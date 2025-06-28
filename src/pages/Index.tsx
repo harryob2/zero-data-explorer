@@ -161,7 +161,7 @@ const Index = () => {
     return sessions;
   };
 
-  // Read file from Flipper Zero with much longer timeout and better buffering
+  // Read file from Flipper Zero with better CLI handling
   const readFlipperFile = async () => {
     if (!writerRef.current || !readerRef.current) return;
 
@@ -174,103 +174,132 @@ const Index = () => {
       let csvContent = '';
       let readingFile = false;
       let foundHeader = false;
-      let lastDataTime = Date.now();
+      let commandComplete = false;
       
-      // Much longer timeout - 60 seconds
+      console.log('Starting to read file from Flipper Zero...');
+      
+      // Set a timeout for the entire operation
       const timeout = setTimeout(() => {
-        toast.error('Timeout reading file from Flipper Zero (60s limit reached)');
+        console.log('Timeout reached - stopping file read');
+        toast.error('Timeout reading file from Flipper Zero');
       }, 60000);
       
-      while (true) {
+      while (!commandComplete) {
         const { value, done } = await readerRef.current.read();
         if (done) break;
         
         const text = new TextDecoder().decode(value);
         buffer += text;
-        lastDataTime = Date.now();
         
-        console.log('Received:', text);
+        console.log('Received:', JSON.stringify(text)); // Better logging to see control characters
+        
+        // Remove ANSI escape sequences and control characters
+        const cleanText = text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
         
         // Look for the CSV header to start reading
-        if (buffer.includes('Timestamp,CO2_PPM') && !foundHeader) {
+        if (!foundHeader && (buffer.includes('Timestamp,CO2_PPM') || cleanText.includes('Timestamp,CO2_PPM'))) {
           foundHeader = true;
           readingFile = true;
-          // Extract everything from the header onwards
-          const headerIndex = buffer.indexOf('Timestamp,CO2_PPM');
-          csvContent = buffer.substring(headerIndex);
           console.log('Found CSV header, starting to collect data...');
-        } else if (readingFile && foundHeader) {
-          // Continue adding to CSV content
-          csvContent += text;
-        }
-        
-        // Check for command prompt return (indicating end of file)
-        if (buffer.includes('>: ') && foundHeader) {
-          console.log('Found command prompt, file reading complete');
-          break;
-        }
-        
-        // Check for errors
-        if (buffer.includes('Error:') || buffer.includes('File not found')) {
-          console.log('Error detected in response');
-          break;
-        }
-        
-        // If we haven't seen data for 10 seconds and we have some content, assume we're done
-        if (foundHeader && csvContent.length > 50) {
-          const timeSinceLastData = Date.now() - lastDataTime;
-          if (timeSinceLastData > 10000) {
-            console.log('No new data for 10 seconds, assuming complete');
-            break;
+          
+          // Extract everything from the header onwards, cleaning ANSI codes
+          const cleanBuffer = buffer.replace(/\x1b\[[0-9;]*m/g, '');
+          const headerIndex = cleanBuffer.indexOf('Timestamp,CO2_PPM');
+          if (headerIndex !== -1) {
+            csvContent = cleanBuffer.substring(headerIndex);
           }
+        } else if (readingFile && foundHeader) {
+          // Continue adding cleaned text to CSV content
+          csvContent += cleanText;
         }
         
-        // If buffer gets too large, trim the beginning but keep recent data
-        if (buffer.length > 50000) {
-          buffer = buffer.slice(-25000);
+        // Check for command completion - look for the prompt
+        if (foundHeader && (buffer.includes('>:') || buffer.includes('>'))) {
+          console.log('Found command prompt, file reading complete');
+          commandComplete = true;
+          break;
+        }
+        
+        // Check for file not found or error
+        if (buffer.includes('File not found') || buffer.includes('Error:') || buffer.includes('Invalid')) {
+          console.log('File not found or error detected');
+          toast.error('CO2 logger file not found on Flipper Zero');
+          clearTimeout(timeout);
+          return;
+        }
+        
+        // If we haven't found the header yet but see a lot of output, it might be the welcome screen
+        if (!foundHeader && buffer.length > 2000) {
+          console.log('Large buffer without header - might be welcome screen, continuing...');
+        }
+        
+        // Prevent buffer from getting too large
+        if (buffer.length > 100000) {
+          // Keep only the last 50KB
+          buffer = buffer.slice(-50000);
         }
       }
       
       clearTimeout(timeout);
       
       console.log('Final CSV Content length:', csvContent.length);
-      console.log('First 500 chars:', csvContent.substring(0, 500));
+      console.log('First 500 chars of CSV:', csvContent.substring(0, 500));
       
       if (csvContent && csvContent.includes('Timestamp,CO2_PPM')) {
-        // Clean up the CSV content - remove any extra text after the data
+        // Clean up the CSV content more thoroughly
         const lines = csvContent.split('\n');
         const cleanLines = [];
+        let headerFound = false;
         
         for (const line of lines) {
           const trimmedLine = line.trim();
-          if (trimmedLine.includes('Timestamp,CO2_PPM') || 
-              (trimmedLine.includes(',') && !trimmedLine.includes('>:') && 
-               !trimmedLine.includes('Error:') && !trimmedLine.includes('storage'))) {
-            cleanLines.push(trimmedLine);
-          } else if (cleanLines.length > 1 && trimmedLine === '') {
-            // Stop at empty line after we've started collecting data
+          
+          // Skip empty lines before header
+          if (!headerFound && !trimmedLine) {
             continue;
-          } else if (cleanLines.length > 1 && trimmedLine.includes('>:')) {
-            // Stop when we hit the command prompt
-            break;
+          }
+          
+          // Found header
+          if (trimmedLine === 'Timestamp,CO2_PPM') {
+            headerFound = true;
+            cleanLines.push(trimmedLine);
+            continue;
+          }
+          
+          // After header, collect data lines
+          if (headerFound) {
+            // Check if it's a valid data line (timestamp,number)
+            if (trimmedLine.includes(',') && !trimmedLine.includes('>') && !trimmedLine.includes('storage')) {
+              const parts = trimmedLine.split(',');
+              if (parts.length === 2 && !isNaN(parseInt(parts[0])) && !isNaN(parseInt(parts[1]))) {
+                cleanLines.push(trimmedLine);
+              }
+            } else if (trimmedLine.includes('>') || trimmedLine === '') {
+              // Stop at command prompt or empty line after data
+              break;
+            }
           }
         }
         
         const cleanCSV = cleanLines.join('\n');
         console.log('Clean CSV length:', cleanCSV.length);
-        console.log('Clean CSV preview:', cleanCSV.substring(0, 200));
+        console.log('Clean CSV preview:', cleanCSV.substring(0, 300));
         
-        const parsedSessions = parseCSVData(cleanCSV);
-        setSessions(parsedSessions);
-        setCurrentSessionIndex(0);
-        
-        if (parsedSessions.length > 0) {
-          toast.success(`Found ${parsedSessions.length} logging sessions with ${parsedSessions.reduce((acc, session) => acc + session.data.length, 0)} total data points`);
+        if (cleanLines.length > 1) { // More than just header
+          const parsedSessions = parseCSVData(cleanCSV);
+          setSessions(parsedSessions);
+          setCurrentSessionIndex(0);
+          
+          if (parsedSessions.length > 0) {
+            toast.success(`Found ${parsedSessions.length} logging sessions with ${parsedSessions.reduce((acc, session) => acc + session.data.length, 0)} total data points`);
+          } else {
+            toast.warning('CSV file found but no valid data could be parsed');
+          }
         } else {
-          toast.warning('CSV file found but no valid data could be parsed');
+          toast.warning('CSV file found but appears to be empty or contains no data');
         }
       } else {
-        toast.error('No CO2 data found on Flipper Zero - check if the file exists');
+        toast.error('No CO2 data found - make sure the CO2 logger app has recorded data');
       }
     } catch (error) {
       console.error('Error reading file:', error);
