@@ -161,7 +161,7 @@ const Index = () => {
     return sessions;
   };
 
-  // Read file from Flipper Zero with better CLI handling
+  // Read file from Flipper Zero with proper command execution handling
   const readFlipperFile = async () => {
     if (!writerRef.current || !readerRef.current) return;
 
@@ -173,22 +173,19 @@ const Index = () => {
       // Write the entire command at once to ensure proper transmission
       await writerRef.current.write(new TextEncoder().encode(command));
       
-      // Add a small delay to ensure command is processed
-      await new Promise(resolve => setTimeout(resolve, 500));
+      console.log('Starting to read file from Flipper Zero...');
       
       let buffer = '';
       let csvContent = '';
-      let readingFile = false;
       let foundHeader = false;
       let commandComplete = false;
-      
-      console.log('Starting to read file from Flipper Zero...');
+      let commandEchoed = false;
       
       // Set a timeout for the entire operation
       const timeout = setTimeout(() => {
         console.log('Timeout reached - stopping file read');
         toast.error('Timeout reading file from Flipper Zero');
-      }, 30000); // Reduced to 30 seconds for faster feedback
+      }, 45000); // Increased timeout to allow for command processing
       
       while (!commandComplete) {
         const { value, done } = await readerRef.current.read();
@@ -202,41 +199,49 @@ const Index = () => {
         // Remove ANSI escape sequences and control characters
         const cleanText = text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
         
-        // Look for the CSV header to start reading
-        if (!foundHeader && (buffer.includes('Timestamp,CO2_PPM') || cleanText.includes('Timestamp,CO2_PPM'))) {
-          foundHeader = true;
-          readingFile = true;
-          console.log('Found CSV header, starting to collect data...');
-          
-          // Extract everything from the header onwards, cleaning ANSI codes
-          const cleanBuffer = buffer.replace(/\x1b\[[0-9;]*m/g, '');
-          const headerIndex = cleanBuffer.indexOf('Timestamp,CO2_PPM');
-          if (headerIndex !== -1) {
-            csvContent = cleanBuffer.substring(headerIndex);
+        // Wait for the command echo to complete first
+        if (!commandEchoed) {
+          if (buffer.includes('co2_logger.csv')) {
+            console.log('Command echo complete, waiting for file output...');
+            commandEchoed = true;
+            // Clear buffer after command echo
+            buffer = '';
+            continue;
           }
-        } else if (readingFile && foundHeader) {
-          // Continue adding cleaned text to CSV content
-          csvContent += cleanText;
         }
         
-        // Check for command completion - look for the prompt
-        if (foundHeader && (buffer.includes('>:') || buffer.includes('>'))) {
-          console.log('Found command prompt, file reading complete');
-          commandComplete = true;
-          break;
-        }
-        
-        // Check for file not found or error
-        if (buffer.includes('File not found') || buffer.includes('Error:') || buffer.includes('Invalid')) {
-          console.log('File not found or error detected');
-          toast.error('CO2 logger file not found on Flipper Zero');
-          clearTimeout(timeout);
-          return;
-        }
-        
-        // If we haven't found the header yet but see a lot of output, it might be the welcome screen
-        if (!foundHeader && buffer.length > 2000) {
-          console.log('Large buffer without header - might be welcome screen, continuing...');
+        // Only start looking for CSV data after command echo is complete
+        if (commandEchoed) {
+          // Look for the CSV header to start reading
+          if (!foundHeader && (buffer.includes('Timestamp,CO2_PPM') || cleanText.includes('Timestamp,CO2_PPM'))) {
+            foundHeader = true;
+            console.log('Found CSV header, starting to collect data...');
+            
+            // Extract everything from the header onwards, cleaning ANSI codes
+            const cleanBuffer = buffer.replace(/\x1b\[[0-9;]*m/g, '');
+            const headerIndex = cleanBuffer.indexOf('Timestamp,CO2_PPM');
+            if (headerIndex !== -1) {
+              csvContent = cleanBuffer.substring(headerIndex);
+            }
+          } else if (foundHeader) {
+            // Continue adding cleaned text to CSV content
+            csvContent += cleanText;
+          }
+          
+          // Check for command completion - look for the prompt
+          if (foundHeader && (buffer.includes('>:') || buffer.includes('>'))) {
+            console.log('Found command prompt, file reading complete');
+            commandComplete = true;
+            break;
+          }
+          
+          // Check for file not found or error
+          if (buffer.includes('File not found') || buffer.includes('Error:') || buffer.includes('Invalid')) {
+            console.log('File not found or error detected');
+            toast.error('CO2 logger file not found on Flipper Zero');
+            clearTimeout(timeout);
+            return;
+          }
         }
         
         // Prevent buffer from getting too large
