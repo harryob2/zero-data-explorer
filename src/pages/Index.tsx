@@ -1,10 +1,43 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft, ArrowRight, Zap, Wifi, WifiOff } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { toast } from 'sonner';
+
+// Type definitions for Web Serial API
+declare global {
+  interface Navigator {
+    serial: Serial;
+  }
+}
+
+interface Serial {
+  requestPort(options?: SerialPortRequestOptions): Promise<SerialPort>;
+  getPorts(): Promise<SerialPort[]>;
+}
+
+interface SerialPortRequestOptions {
+  filters?: SerialPortFilter[];
+}
+
+interface SerialPortFilter {
+  usbVendorId?: number;
+  usbProductId?: number;
+}
+
+interface SerialPort {
+  open(options: { baudRate: number }): Promise<void>;
+  close(): Promise<void>;
+  getInfo(): SerialPortInfo;
+  readable: ReadableStream<Uint8Array> | null;
+  writable: WritableStream<Uint8Array> | null;
+}
+
+interface SerialPortInfo {
+  usbVendorId?: number;
+  usbProductId?: number;
+}
 
 interface CO2DataPoint {
   timestamp: string;
@@ -128,7 +161,7 @@ const Index = () => {
     return sessions;
   };
 
-  // Read file from Flipper Zero
+  // Read file from Flipper Zero with proper buffering
   const readFlipperFile = async () => {
     if (!writerRef.current || !readerRef.current) return;
 
@@ -137,38 +170,71 @@ const Index = () => {
       const command = 'storage read /ext/apps_data/co2_logger/co2_logger.csv\n';
       await writerRef.current.write(new TextEncoder().encode(command));
       
+      let buffer = '';
       let csvContent = '';
       let readingFile = false;
+      let foundHeader = false;
       
-      // Read response
+      // Set up timeout
       const timeout = setTimeout(() => {
         toast.error('Timeout reading file from Flipper Zero');
-      }, 10000);
+      }, 15000);
       
       while (true) {
         const { value, done } = await readerRef.current.read();
         if (done) break;
         
         const text = new TextDecoder().decode(value);
+        buffer += text;
+        
         console.log('Received:', text);
         
-        if (text.includes('Timestamp,CO2_PPM')) {
+        // Look for the CSV header to start reading
+        if (buffer.includes('Timestamp,CO2_PPM') && !foundHeader) {
+          foundHeader = true;
           readingFile = true;
-          csvContent += text;
-        } else if (readingFile) {
-          csvContent += text;
-          
-          // Check if we've reached the end of the file
-          if (text.includes('>: ') || text.includes('Error:')) {
-            break;
-          }
+          // Extract everything from the header onwards
+          const headerIndex = buffer.indexOf('Timestamp,CO2_PPM');
+          csvContent = buffer.substring(headerIndex);
+        } else if (readingFile && foundHeader) {
+          // Continue adding to CSV content
+          const newContent = text;
+          csvContent += newContent;
+        }
+        
+        // Check for end of file or error
+        if (buffer.includes('>: ') || buffer.includes('Error:') || buffer.includes('File not found')) {
+          break;
+        }
+        
+        // If buffer gets too large, trim the beginning
+        if (buffer.length > 10000) {
+          buffer = buffer.slice(-5000);
         }
       }
       
       clearTimeout(timeout);
       
-      if (csvContent) {
-        const parsedSessions = parseCSVData(csvContent);
+      console.log('Final CSV Content:', csvContent);
+      
+      if (csvContent && csvContent.includes('Timestamp,CO2_PPM')) {
+        // Clean up the CSV content - remove any extra text after the data
+        const lines = csvContent.split('\n');
+        const cleanLines = [];
+        
+        for (const line of lines) {
+          if (line.includes('Timestamp,CO2_PPM') || (line.includes(',') && !line.includes('>:') && !line.includes('Error:'))) {
+            cleanLines.push(line.trim());
+          } else if (cleanLines.length > 0 && line.trim() === '') {
+            // Stop at empty line after we've started collecting data
+            break;
+          }
+        }
+        
+        const cleanCSV = cleanLines.join('\n');
+        console.log('Clean CSV:', cleanCSV);
+        
+        const parsedSessions = parseCSVData(cleanCSV);
         setSessions(parsedSessions);
         setCurrentSessionIndex(0);
         toast.success(`Found ${parsedSessions.length} logging sessions`);
