@@ -166,9 +166,15 @@ const Index = () => {
     if (!writerRef.current || !readerRef.current) return;
 
     try {
-      // Send command to read the CO2 logger file
+      // Send command to read the CO2 logger file with proper termination
       const command = 'storage read /ext/apps_data/co2_logger/co2_logger.csv\n';
+      console.log('Sending command:', JSON.stringify(command));
+      
+      // Write the entire command at once to ensure proper transmission
       await writerRef.current.write(new TextEncoder().encode(command));
+      
+      // Add a small delay to ensure command is processed
+      await new Promise(resolve => setTimeout(resolve, 500));
       
       let buffer = '';
       let csvContent = '';
@@ -182,7 +188,7 @@ const Index = () => {
       const timeout = setTimeout(() => {
         console.log('Timeout reached - stopping file read');
         toast.error('Timeout reading file from Flipper Zero');
-      }, 60000);
+      }, 30000); // Reduced to 30 seconds for faster feedback
       
       while (!commandComplete) {
         const { value, done } = await readerRef.current.read();
@@ -191,7 +197,7 @@ const Index = () => {
         const text = new TextDecoder().decode(value);
         buffer += text;
         
-        console.log('Received:', JSON.stringify(text)); // Better logging to see control characters
+        console.log('Received:', JSON.stringify(text));
         
         // Remove ANSI escape sequences and control characters
         const cleanText = text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
