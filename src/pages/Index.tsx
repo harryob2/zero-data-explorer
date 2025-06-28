@@ -64,7 +64,7 @@ const Index = () => {
   // Request permission to access Flipper Zero
   const requestFlipperPort = async (): Promise<SerialPort | null> => {
     try {
-      const [port] = await navigator.serial.requestPort({
+      const port = await navigator.serial.requestPort({
         filters: [{ usbVendorId: 0x0483, usbProductId: 0x5740 }]
       });
       return port;
