@@ -166,8 +166,8 @@ const Index = () => {
     if (!writerRef.current || !readerRef.current) return;
 
     try {
-      // Send command to read the CO2 logger file with proper termination
-      const command = 'storage read /ext/apps_data/co2_logger/co2_logger.csv\n';
+      // Send command to read the CO2 logger file with correct filename
+      const command = 'storage read /ext/apps_data/co2_logger/co2_log.csv\n';
       console.log('Sending command:', JSON.stringify(command));
       
       // Write the entire command at once to ensure proper transmission
@@ -185,7 +185,7 @@ const Index = () => {
       const timeout = setTimeout(() => {
         console.log('Timeout reached - stopping file read');
         toast.error('Timeout reading file from Flipper Zero');
-      }, 45000); // Increased timeout to allow for command processing
+      }, 45000);
       
       while (!commandComplete) {
         const { value, done } = await readerRef.current.read();
@@ -195,13 +195,14 @@ const Index = () => {
         buffer += text;
         
         console.log('Received:', JSON.stringify(text));
+        console.log('Current buffer length:', buffer.length);
         
         // Remove ANSI escape sequences and control characters
         const cleanText = text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
         
         // Wait for the command echo to complete first
         if (!commandEchoed) {
-          if (buffer.includes('co2_logger.csv')) {
+          if (buffer.includes('co2_log.csv')) {
             console.log('Command echo complete, waiting for file output...');
             commandEchoed = true;
             // Clear buffer after command echo
@@ -212,6 +213,26 @@ const Index = () => {
         
         // Only start looking for CSV data after command echo is complete
         if (commandEchoed) {
+          // Check for any error messages immediately
+          if (buffer.includes('File not found') || 
+              buffer.includes('Error') || 
+              buffer.includes('Invalid') ||
+              buffer.includes('No such file') ||
+              buffer.includes('Cannot open') ||
+              buffer.includes('Permission denied')) {
+            console.log('Error detected in buffer:', buffer);
+            toast.error('Error reading file: ' + buffer.split('\n').find(line => 
+              line.includes('Error') || 
+              line.includes('File not found') || 
+              line.includes('Invalid') ||
+              line.includes('No such file') ||
+              line.includes('Cannot open') ||
+              line.includes('Permission denied')
+            ));
+            clearTimeout(timeout);
+            return;
+          }
+          
           // Look for the CSV header to start reading
           if (!foundHeader && (buffer.includes('Timestamp,CO2_PPM') || cleanText.includes('Timestamp,CO2_PPM'))) {
             foundHeader = true;
@@ -235,10 +256,10 @@ const Index = () => {
             break;
           }
           
-          // Check for file not found or error
-          if (buffer.includes('File not found') || buffer.includes('Error:') || buffer.includes('Invalid')) {
-            console.log('File not found or error detected');
-            toast.error('CO2 logger file not found on Flipper Zero');
+          // If we haven't found a header after reasonable time, show what we got
+          if (!foundHeader && buffer.length > 1000) {
+            console.log('No header found, showing raw buffer for debugging:', buffer);
+            toast.error('Unexpected response from Flipper Zero. Check console for details.');
             clearTimeout(timeout);
             return;
           }
